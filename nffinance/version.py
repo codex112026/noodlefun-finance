@@ -2,6 +2,6 @@
 __version__ = "1.0.0"
 
 # GitHub 仓库（public），更新检测从这里读取 Releases
-noodlefun-finance = "codex112026/noodlefun-finance"
+GITHUB_REPO = "codex112026/noodlefun-finance"
 
 APP_NAME = "Noodle Fun Finance"
