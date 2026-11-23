@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
 from . import report, updater
 from .db import CHANNELS, Database
 from .i18n import LANGS, Translator, fmt_eur
-from .paths import resource_path
+from pathlib import Path
+
+from .paths import configured_data_dir, default_data_dir, resource_path, save_data_dir
 from .version import __version__
 
 GERMAN = QLocale(QLocale.German, QLocale.Austria)
@@ -476,6 +478,7 @@ class MainWindow(QMainWindow):
         m.addAction(a)
         m.addAction(QAction(t("open_data_dir"), self, triggered=lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self.db.path.parent)))))
+        m.addAction(QAction(t("change_data_dir"), self, triggered=self.change_data_dir))
         m.addSeparator()
         m.addAction(QAction(t("quit"), self, triggered=self.close))
         lm = mb.addMenu(t("menu_language"))
@@ -492,6 +495,32 @@ class MainWindow(QMainWindow):
         self.db.set_setting("lang", code)
         self.tr = Translator(code)
         self.build()
+
+    def change_data_dir(self):
+        t = self.tr
+        cur = self.db.path.parent
+        d = QFileDialog.getExistingDirectory(self, t("choose_data_dir_title"), str(cur))
+        if not d or Path(d) == cur:
+            return
+        target = Path(d) / "finance.db"
+        try:
+            if target.exists():
+                QMessageBox.information(self, t("change_data_dir"), t("data_dir_found", p=d) + "\n\n" + t("data_dir_sync_hint"))
+            else:
+                if QMessageBox.question(self, t("change_data_dir"), t("data_dir_copy", p=d) + "\n\n" + t("data_dir_sync_hint")) != QMessageBox.Yes:
+                    return
+                self.db.backup_to(str(target))
+            new_db = Database(target)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, t("change_data_dir"), t("data_dir_error") + str(e))
+            return
+        old = self.db
+        self.db = new_db
+        save_data_dir(d)
+        old.close()
+        self.tr = Translator(new_db.get_setting("lang", "zh"))  # 语言等设置随数据文件夹一起恢复
+        self.build()
+        self.statusBar().showMessage(self.tr("data_dir_switched") + d, 6000)
 
     def backup(self):
         path, _ = QFileDialog.getSaveFileName(self, self.tr("backup"), "NoodleFun_backup.db", "SQLite (*.db)")
@@ -551,10 +580,33 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
+def open_database() -> Database:
+    """首次运行让用户选择数据文件夹；重装后选回原文件夹即可恢复全部数据与设置。"""
+    tr = Translator("zh")
+    d = configured_data_dir()
+    if d is None:
+        if (default_data_dir() / "finance.db").exists():  # 旧版本已有数据：继续使用
+            d = default_data_dir()
+        else:
+            QMessageBox.information(None, tr("choose_data_dir_title"), tr("first_run_msg"))
+            chosen = QFileDialog.getExistingDirectory(None, tr("choose_data_dir_title"))
+            d = Path(chosen) if chosen else default_data_dir()
+        save_data_dir(d)
+    while True:
+        try:
+            db = Database(Path(d) / "finance.db")
+            return db
+        except Exception as e:  # noqa: BLE001  例如 OneDrive 文件夹暂时不可用
+            QMessageBox.warning(None, tr("choose_data_dir_title"), f"{tr('data_dir_error')}\n{d}\n{e}")
+            chosen = QFileDialog.getExistingDirectory(None, tr("choose_data_dir_title"))
+            d = Path(chosen) if chosen else default_data_dir()
+            save_data_dir(d)
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    db = Database()
+    db = open_database()
     w = MainWindow(db)
     w.show()
     if "--no-update-check" not in sys.argv:

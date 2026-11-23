@@ -18,6 +18,8 @@ class Database:
         self.path = Path(path) if path else data_dir() / "finance.db"
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
+        # 数据库放在 OneDrive 等同步文件夹时，用单文件模式，避免 -wal/-shm 文件同步出错
+        self.conn.execute("PRAGMA journal_mode=DELETE")
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS revenue(
@@ -120,6 +122,13 @@ class Database:
             [key, str(value)],
         )
         self.conn.commit()
+
+    def close(self):
+        try:
+            self.conn.commit()
+            self.conn.close()
+        except Exception:
+            pass
 
     def backup_to(self, dest: str):
         out = sqlite3.connect(dest)

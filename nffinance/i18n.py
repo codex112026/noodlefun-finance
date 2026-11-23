@@ -73,6 +73,26 @@ _T = {
     "page": {"zh": "第 {n} 页", "de": "Seite {n}"},
     "daily_report_date": {"zh": "日报日期", "de": "Datum des Tagesberichts"},
     "remove": {"zh": "删除所选", "de": "Auswahl löschen"},
+    "change_data_dir": {"zh": "更改数据文件夹…", "de": "Datenordner ändern…"},
+    "choose_data_dir_title": {"zh": "选择数据文件夹", "de": "Datenordner wählen"},
+    "first_run_msg": {
+        "zh": "请选择用来保存数据和设置的文件夹（例如 OneDrive 里的文件夹）。\n\n如果是重装软件，请选择原来的文件夹，所有数据和设置会自动恢复。",
+        "de": "Bitte wählen Sie den Ordner für Daten und Einstellungen (z. B. in OneDrive).\n\nBei einer Neuinstallation wählen Sie den bisherigen Ordner – Daten und Einstellungen werden automatisch wiederhergestellt.",
+    },
+    "data_dir_found": {
+        "zh": "该文件夹里已有数据，将直接使用其中的数据和设置。\n\n{p}",
+        "de": "In diesem Ordner sind bereits Daten vorhanden. Sie werden samt Einstellungen übernommen.\n\n{p}",
+    },
+    "data_dir_copy": {
+        "zh": "该文件夹里还没有数据。是否把当前数据复制过去并改用新文件夹？\n\n{p}",
+        "de": "In diesem Ordner sind noch keine Daten. Aktuelle Daten dorthin kopieren und den Ordner verwenden?\n\n{p}",
+    },
+    "data_dir_switched": {"zh": "已切换数据文件夹：", "de": "Datenordner gewechselt: "},
+    "data_dir_error": {"zh": "无法使用该数据文件夹：", "de": "Datenordner kann nicht verwendet werden: "},
+    "data_dir_sync_hint": {
+        "zh": "提示：同步文件夹请不要在两台电脑上同时打开本软件。",
+        "de": "Hinweis: Bei synchronisierten Ordnern die Anwendung nicht gleichzeitig auf zwei Computern öffnen.",
+    },
     "new_name": {"zh": "新增", "de": "Neu"},
 }
 
