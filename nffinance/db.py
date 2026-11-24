@@ -98,6 +98,13 @@ class Database:
         )
         self.conn.commit()
 
+    def update_expense(self, exp_id: int, d: str, category: str, cents: int, note: str = ""):
+        self.conn.execute(
+            "UPDATE expenses SET date=?, category=?, amount=?, note=? WHERE id=?",
+            [d, category, int(cents), note, exp_id],
+        )
+        self.conn.commit()
+
     def delete_expense(self, exp_id: int):
         self.conn.execute("DELETE FROM expenses WHERE id=?", [exp_id])
         self.conn.commit()

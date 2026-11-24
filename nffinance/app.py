@@ -3,12 +3,14 @@ import sys
 import threading
 from datetime import date as _date
 
-from PySide6.QtCore import QDate, QLocale, Qt, QObject, Signal, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QIcon
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+from PySide6.QtCore import QDate, QEvent, QObject, QRegularExpression, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QRegularExpressionValidator
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDateEdit, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QComboBox, QDateEdit, QDialog, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-    QProgressDialog, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QProgressDialog, QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import report, updater
@@ -19,26 +21,155 @@ from pathlib import Path
 from .paths import configured_data_dir, default_data_dir, resource_path, save_data_dir
 from .version import __version__
 
-GERMAN = QLocale(QLocale.German, QLocale.Austria)
 
 
-class MoneyEdit(QDoubleSpinBox):
-    def __init__(self):
-        super().__init__()
-        self.setLocale(GERMAN)
-        self.setDecimals(2)
-        self.setRange(0, 10_000_000)
-        self.setSingleStep(10)
-        self.setSuffix(" €")
+def parse_cents(text: str) -> int:
+    t = text.strip().replace(" ", "").replace(",", ".")
+    if not t:
+        return 0
+    try:
+        return int((Decimal(t) * 100).quantize(Decimal(1), ROUND_HALF_UP))
+    except InvalidOperation:
+        return 0
+
+
+def input_text(cents: int) -> str:
+    return "" if not cents else f"{cents // 100},{cents % 100:02d}"
+
+
+class MoneyEdit(QLineEdit):
+    """金额输入：默认留空（不预设 0,00），可输入 12,5 或 12.50。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.setAlignment(Qt.AlignRight)
-        self.setGroupSeparatorShown(False)
+        self.setValidator(QRegularExpressionValidator(QRegularExpression(r"^\d{0,9}([.,]\d{0,2})?$"), self))
         self.setMinimumWidth(140)
+        self.editingFinished.connect(self._tidy)
+
+    def _tidy(self):
+        if self.text().strip():
+            self.setText(input_text(self.cents()) or "0,00")
 
     def cents(self) -> int:
-        return int(round(self.value() * 100))
+        return parse_cents(self.text())
 
     def set_cents(self, c: int):
-        self.setValue(c / 100)
+        self.setText(input_text(c))
+
+
+class NavDateEdit(QDateEdit):
+    """日期输入：↑↓ 增减日(tt)，←→ 增减月(mm)，Enter 发出 enterPressed。"""
+
+    enterPressed = Signal()
+
+    def __init__(self, date=None, parent=None):
+        super().__init__(date or QDate.currentDate(), parent)
+        self.setDisplayFormat("dd.MM.yyyy")
+        self.setCalendarPopup(True)
+        self.lineEdit().installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if obj is self.lineEdit() and ev.type() == QEvent.KeyPress and not (
+            ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier)
+        ):
+            k, d = ev.key(), self.date()
+            if k == Qt.Key_Up:
+                self.setDate(d.addDays(1))
+                return True
+            if k == Qt.Key_Down:
+                self.setDate(d.addDays(-1))
+                return True
+            if k == Qt.Key_Right:
+                self.setDate(d.addMonths(1))
+                return True
+            if k == Qt.Key_Left:
+                self.setDate(d.addMonths(-1))
+                return True
+        return super().eventFilter(obj, ev)
+
+    def keyPressEvent(self, ev):
+        super().keyPressEvent(ev)
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.enterPressed.emit()
+
+
+class NavCombo(QComboBox):
+    enterPressed = Signal()
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.enterPressed.emit()
+            return
+        super().keyPressEvent(ev)
+
+
+def link_enter(widgets, on_last):
+    """Enter 跳到下一项；在最后一项按 Enter 调用 on_last。"""
+    def sig(w):
+        return w.returnPressed if isinstance(w, QLineEdit) else w.enterPressed
+
+    for i, w in enumerate(widgets):
+        if i + 1 < len(widgets):
+            sig(w).connect(lambda n=widgets[i + 1]: n.setFocus(Qt.TabFocusReason))
+        else:
+            sig(w).connect(on_last)
+
+
+# ---- 表格内双击编辑用的委托 ----
+def _commit(model, index, display, user):
+    model.blockSignals(True)
+    model.setData(index, user, Qt.UserRole)
+    model.setData(index, display, Qt.DisplayRole)
+    model.blockSignals(False)
+    model.dataChanged.emit(index, index)  # 只触发一次 itemChanged
+
+
+class MoneyDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        return MoneyEdit(parent)
+
+    def setEditorData(self, editor, index):
+        editor.set_cents(index.data(Qt.UserRole) or 0)
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index):
+        c = editor.cents()
+        _commit(model, index, fmt_eur(c), c)
+
+
+class DateDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        e = NavDateEdit(parent=parent)
+        e.setCalendarPopup(False)
+        return e
+
+    def setEditorData(self, editor, index):
+        editor.setDate(QDate.fromString(index.data(Qt.UserRole), "yyyy-MM-dd"))
+
+    def setModelData(self, editor, model, index):
+        d = editor.date()
+        _commit(model, index, d.toString("dd.MM.yyyy"), d.toString("yyyy-MM-dd"))
+
+
+class CategoryDelegate(QStyledItemDelegate):
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db = db
+
+    def createEditor(self, parent, option, index):
+        c = NavCombo(parent)
+        c.addItems(self.db.categories())
+        return c
+
+    def setEditorData(self, editor, index):
+        cur = index.data(Qt.DisplayRole)
+        if editor.findText(cur) < 0:
+            editor.addItem(cur)
+        editor.setCurrentText(cur)
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(), Qt.DisplayRole)
 
 
 class MonthPicker(QDateEdit):
@@ -52,10 +183,10 @@ class MonthPicker(QDateEdit):
         return d.year(), d.month()
 
 
-def make_table(headers):
+def make_table(headers, editable=False):
     t = QTableWidget(0, len(headers))
     t.setHorizontalHeaderLabels(headers)
-    t.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    t.setEditTriggers(QAbstractItemView.DoubleClicked if editable else QAbstractItemView.NoEditTriggers)
     t.setSelectionBehavior(QAbstractItemView.SelectRows)
     t.setSelectionMode(QAbstractItemView.SingleSelection)
     t.verticalHeader().setVisible(False)
@@ -90,10 +221,9 @@ class RevenueTab(QWidget):
     def __init__(self, db, tr):
         super().__init__()
         self.db, self.tr = db, tr
+        self._loading = False
         t = tr
-        self.date = QDateEdit(QDate.currentDate())
-        self.date.setCalendarPopup(True)
-        self.date.setDisplayFormat("dd.MM.yyyy")
+        self.date = NavDateEdit()
         self.edits = {c: MoneyEdit() for c in CHANNELS}
         self.total = QLabel("0,00 €")
         f = self.total.font()
@@ -118,7 +248,10 @@ class RevenueTab(QWidget):
         lay.addLayout(form)
         lay.addLayout(btns)
 
-        self.table = make_table([t("date")] + [t(c) for c in CHANNELS] + [t("total")])
+        self.table = make_table([t("date")] + [t(c) for c in CHANNELS] + [t("total")], editable=True)
+        self.table.setItemDelegateForColumn(0, DateDelegate(self.table))
+        for j in range(1, 6):
+            self.table.setItemDelegateForColumn(j, MoneyDelegate(self.table))
         top = QHBoxLayout()
         top.addWidget(box)
         top.addStretch()
@@ -129,10 +262,12 @@ class RevenueTab(QWidget):
 
         self.date.dateChanged.connect(self.on_date)
         for e in self.edits.values():
-            e.valueChanged.connect(self.update_total)
+            e.textChanged.connect(self.update_total)
         self.btn_save.clicked.connect(self.save)
         self.btn_del.clicked.connect(self.delete)
         self.table.cellClicked.connect(self.pick_row)
+        self.table.itemChanged.connect(self.on_item_changed)
+        link_enter([self.date, *self.edits.values(), self.note], self.ask_save)
         self._month = None
         self.on_date()
 
@@ -153,19 +288,65 @@ class RevenueTab(QWidget):
         d = self.date.date()
         self._month = (d.year(), d.month())
         rows = self.db.revenues_in_month(d.year(), d.month())
+        self._loading = True
         self.table.setRowCount(0)
         for r in rows:
             i = self.table.rowCount()
             self.table.insertRow(i)
-            self.table.setItem(i, 0, cell(_date.fromisoformat(r["date"]).strftime("%d.%m.%Y")))
-            self.table.item(i, 0).setData(Qt.UserRole, r["date"])
+            it = cell(_date.fromisoformat(r["date"]).strftime("%d.%m.%Y"))
+            it.setData(Qt.UserRole, r["date"])
+            it.setData(Qt.UserRole + 1, r["date"])  # 数据库里的原日期（改日期时用来定位）
+            self.table.setItem(i, 0, it)
             for j, c in enumerate(CHANNELS, 1):
-                self.table.setItem(i, j, cell(fmt_eur(r[c]), right=True))
-            self.table.setItem(i, 6, cell(fmt_eur(sum(r[c] for c in CHANNELS)), right=True, bold=True))
+                ci = cell(fmt_eur(r[c]), right=True)
+                ci.setData(Qt.UserRole, r[c])
+                self.table.setItem(i, j, ci)
+            tot = cell(fmt_eur(sum(r[c] for c in CHANNELS)), right=True, bold=True)
+            tot.setFlags(tot.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(i, 6, tot)
+        self._loading = False
 
     def pick_row(self, row, _col):
-        d = _date.fromisoformat(self.table.item(row, 0).data(Qt.UserRole))
+        d = _date.fromisoformat(self.table.item(row, 0).data(Qt.UserRole + 1))
         self.date.setDate(qd(d))
+
+    # ---- 表格内双击编辑：日期改变时，数据跟着新日期走 ----
+    def on_item_changed(self, item):
+        if self._loading or item.column() == 6:
+            return
+        QTimer.singleShot(0, lambda r=item.row(): self.apply_edit(r))
+
+    def apply_edit(self, row):
+        it0 = self.table.item(row, 0)
+        if it0 is None:
+            return
+        key, new = it0.data(Qt.UserRole + 1), it0.data(Qt.UserRole)
+        cents = {c: (self.table.item(row, j).data(Qt.UserRole) or 0) for j, c in enumerate(CHANNELS, 1)}
+        rec = self.db.get_revenue(key)
+        note = rec["note"] if rec else ""
+        if new != key:
+            if self.db.get_revenue(new) and QMessageBox.question(
+                self, self.tr("tab_revenue"), self.tr("overwrite_confirm")
+            ) != QMessageBox.Yes:
+                self.reload()
+                return
+            self.db.delete_revenue(key)
+        self.db.save_revenue(new, cents, note)
+        self.date.setDate(QDate.fromString(new, "yyyy-MM-dd"))
+        self.on_date()
+        self.reload()
+        self.changed.emit()
+        self.window().statusBar().showMessage(self.tr("saved"), 3000)
+
+    def ask_save(self):
+        d = self.date.date().toString("dd.MM.yyyy")
+        r = QMessageBox.question(
+            self, self.tr("save"), self.tr("save_confirm", d=d, t=self.total.text()),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if r == QMessageBox.Yes:
+            self.save()
+            self.date.setFocus(Qt.TabFocusReason)
 
     def save(self):
         self.db.save_revenue(iso(self.date.date()), {c: e.cents() for c, e in self.edits.items()}, self.note.text())
@@ -227,11 +408,10 @@ class ExpenseTab(QWidget):
     def __init__(self, db, tr):
         super().__init__()
         self.db, self.tr = db, tr
+        self._loading = False
         t = tr
-        self.date = QDateEdit(QDate.currentDate())
-        self.date.setCalendarPopup(True)
-        self.date.setDisplayFormat("dd.MM.yyyy")
-        self.cat = QComboBox()
+        self.date = NavDateEdit()
+        self.cat = NavCombo()
         self.cat.setMinimumWidth(180)
         self.btn_cat = QPushButton(t("manage_categories"))
         self.amount = MoneyEdit()
@@ -251,7 +431,10 @@ class ExpenseTab(QWidget):
         lay.addWidget(self.btn_add)
 
         self.month = MonthPicker()
-        self.table = make_table([t("date"), t("category"), t("note"), t("amount")])
+        self.table = make_table([t("date"), t("category"), t("note"), t("amount")], editable=True)
+        self.table.setItemDelegateForColumn(0, DateDelegate(self.table))
+        self.table.setItemDelegateForColumn(1, CategoryDelegate(db, self.table))
+        self.table.setItemDelegateForColumn(3, MoneyDelegate(self.table))
         self.btn_del = QPushButton(t("remove"))
         self.lbl_total = QLabel()
         bar = QHBoxLayout()
@@ -272,6 +455,8 @@ class ExpenseTab(QWidget):
         self.btn_add.clicked.connect(self.add)
         self.btn_del.clicked.connect(self.remove)
         self.month.dateChanged.connect(self.reload)
+        self.table.itemChanged.connect(self.on_item_changed)
+        link_enter([self.date, self.cat, self.amount, self.note], self.ask_add)
         self.refresh_categories()
         self.reload()
 
@@ -286,6 +471,24 @@ class ExpenseTab(QWidget):
         CategoryDialog(self.db, self.tr, self).exec()
         self.refresh_categories()
 
+    def ask_add(self):
+        if not self.cat.currentText():
+            QMessageBox.information(self, self.tr("add"), self.tr("need_category"))
+            return
+        if self.amount.cents() <= 0:
+            self.window().statusBar().showMessage(self.tr("need_amount"), 3000)
+            self.amount.setFocus(Qt.TabFocusReason)
+            return
+        r = QMessageBox.question(
+            self, self.tr("add"),
+            self.tr("add_confirm", d=self.date.date().toString("dd.MM.yyyy"), c=self.cat.currentText(),
+                    a=fmt_eur(self.amount.cents())),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if r == QMessageBox.Yes:
+            self.add()
+            self.cat.setFocus(Qt.TabFocusReason)
+
     def add(self):
         if not self.cat.currentText():
             QMessageBox.information(self, self.tr("add"), self.tr("need_category"))
@@ -293,10 +496,9 @@ class ExpenseTab(QWidget):
         if self.amount.cents() <= 0:
             return
         self.db.add_expense(iso(self.date.date()), self.cat.currentText(), self.amount.cents(), self.note.text())
-        self.amount.setValue(0)
+        self.amount.clear()
         self.note.clear()
-        d = self.date.date()
-        self.month.setDate(d)
+        self.month.setDate(self.date.date())
         self.reload()
         self.changed.emit()
         self.window().statusBar().showMessage(self.tr("saved"), 3000)
@@ -306,24 +508,52 @@ class ExpenseTab(QWidget):
         if row < 0:
             return
         if QMessageBox.question(self, self.tr("delete"), self.tr("confirm_delete")) == QMessageBox.Yes:
-            self.db.delete_expense(self.table.item(row, 0).data(Qt.UserRole))
+            self.db.delete_expense(self.table.item(row, 0).data(Qt.UserRole + 1))
             self.reload()
             self.changed.emit()
 
     def reload(self):
         y, m = self.month.ym()
         rows = self.db.expenses_in_month(y, m)
+        self._loading = True
         self.table.setRowCount(0)
         for r in rows:
             i = self.table.rowCount()
             self.table.insertRow(i)
             it = cell(_date.fromisoformat(r["date"]).strftime("%d.%m.%Y"))
-            it.setData(Qt.UserRole, r["id"])
+            it.setData(Qt.UserRole, r["date"])
+            it.setData(Qt.UserRole + 1, r["id"])
             self.table.setItem(i, 0, it)
             self.table.setItem(i, 1, cell(r["category"]))
             self.table.setItem(i, 2, cell(r["note"]))
-            self.table.setItem(i, 3, cell(fmt_eur(r["amount"]), right=True))
+            am = cell(fmt_eur(r["amount"]), right=True)
+            am.setData(Qt.UserRole, r["amount"])
+            self.table.setItem(i, 3, am)
+        self._loading = False
         self.lbl_total.setText(f"{self.tr('total_expenses')}: {fmt_eur(sum(r['amount'] for r in rows))}")
+
+    # ---- 表格内双击编辑：改日期后记录跟着新日期走 ----
+    def on_item_changed(self, item):
+        if self._loading:
+            return
+        QTimer.singleShot(0, lambda r=item.row(): self.apply_edit(r))
+
+    def apply_edit(self, row):
+        it0 = self.table.item(row, 0)
+        if it0 is None:
+            return
+        eid, d = it0.data(Qt.UserRole + 1), it0.data(Qt.UserRole)
+        cat = self.table.item(row, 1).text()
+        note = self.table.item(row, 2).text()
+        cents = self.table.item(row, 3).data(Qt.UserRole) or 0
+        if cents <= 0 or not cat:
+            self.reload()
+            return
+        self.db.update_expense(eid, d, cat, cents, note)
+        self.month.setDate(QDate.fromString(d, "yyyy-MM-dd"))
+        self.reload()
+        self.changed.emit()
+        self.window().statusBar().showMessage(self.tr("saved"), 3000)
 
 
 # ---------------------------------------------------------------- 汇总
@@ -341,7 +571,7 @@ class SummaryTab(QWidget):
         f.setPointSize(f.pointSize() + 4)
         self.lbl_bal.setFont(f)
         self.btn_month = QPushButton(t("export_monthly"))
-        self.day = QDateEdit(QDate.currentDate())
+        self.day = NavDateEdit()
         self.day.setCalendarPopup(True)
         self.day.setDisplayFormat("dd.MM.yyyy")
         self.btn_day = QPushButton(t("export_daily"))
@@ -468,6 +698,7 @@ class MainWindow(QMainWindow):
         self.exp.changed.connect(self.sumt.reload)
         self.setCentralWidget(tabs)
         self.build_menu()
+        QTimer.singleShot(0, lambda: self.rev.date.setFocus(Qt.TabFocusReason))
 
     def build_menu(self):
         t = self.tr

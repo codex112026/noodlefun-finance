@@ -93,6 +93,13 @@ _T = {
         "zh": "提示：同步文件夹请不要在两台电脑上同时打开本软件。",
         "de": "Hinweis: Bei synchronisierten Ordnern die Anwendung nicht gleichzeitig auf zwei Computern öffnen.",
     },
+    "save_confirm": {"zh": "保存 {d} 的营业额？\n合计：{t}", "de": "Umsatz für {d} speichern?\nSumme: {t}"},
+    "add_confirm": {"zh": "添加这笔支出？\n{d}  {c}  {a}", "de": "Diese Ausgabe hinzufügen?\n{d}  {c}  {a}"},
+    "need_amount": {"zh": "请输入金额", "de": "Bitte einen Betrag eingeben"},
+    "overwrite_confirm": {
+        "zh": "目标日期已有记录，是否覆盖？",
+        "de": "Für dieses Datum existiert bereits ein Eintrag. Überschreiben?",
+    },
     "new_name": {"zh": "新增", "de": "Neu"},
 }
 
