@@ -27,3 +27,8 @@ Windows 桌面软件：记录每日营业额（现金、刷卡、Lieferando、fo
 pip install -r requirements.txt
 python run.py --no-update-check
 ```
+
+## 键盘操作
+- 日期框：↑↓ 增减日，←→ 增减月；Enter 跳到下一项。
+- 金额框默认留空，输入 `12,5` 或 `12.50` 均可；在最后一项按 Enter 会询问是否保存/添加。
+- 已保存的表格：双击任意单元格（含日期）即可修改，改日期后数据跟着新日期走。
