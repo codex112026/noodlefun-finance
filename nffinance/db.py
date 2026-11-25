@@ -44,6 +44,33 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_exp_date ON expenses(date);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS workers(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                hourly INTEGER NOT NULL DEFAULT 0,       -- 时薪（分）
+                cap INTEGER NOT NULL DEFAULT 0,          -- 封顶月薪（分），0=不封顶
+                salary INTEGER NOT NULL DEFAULT 0,       -- 月薪（分），仅用于自动计算时薪
+                method TEXT NOT NULL DEFAULT 'rough',    -- rough | at
+                rest_days INTEGER NOT NULL DEFAULT 8,
+                daily_hours REAL NOT NULL DEFAULT 8,
+                weekly_hours REAL NOT NULL DEFAULT 40
+            );
+            CREATE TABLE IF NOT EXISTS work_entries(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                worker_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                start INTEGER NOT NULL,                  -- 距 0:00 的分钟数
+                end INTEGER NOT NULL,
+                break_min INTEGER NOT NULL DEFAULT 0,
+                minutes INTEGER NOT NULL                 -- 实际工作分钟数
+            );
+            CREATE INDEX IF NOT EXISTS idx_we ON work_entries(worker_id, date);
+            CREATE TABLE IF NOT EXISTS overtime(
+                worker_id INTEGER NOT NULL,
+                ym TEXT NOT NULL,                        -- 'YYYY-MM'
+                amount INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(worker_id, ym)
+            );
             """
         )
         self.conn.commit()
@@ -117,6 +144,74 @@ class Database:
 
     def expenses_on(self, d: str):
         return self.conn.execute("SELECT * FROM expenses WHERE date=? ORDER BY id", [d]).fetchall()
+
+    # ---- 工资结算 ----
+    def workers(self):
+        return self.conn.execute("SELECT * FROM workers ORDER BY name COLLATE NOCASE").fetchall()
+
+    def get_worker(self, wid: int):
+        return self.conn.execute("SELECT * FROM workers WHERE id=?", [wid]).fetchone()
+
+    def save_worker(self, w: dict, wid=None):
+        """新增（wid=None）或更新；姓名重复返回 None，否则返回 id。"""
+        vals = [w["name"].strip(), int(w["hourly"]), int(w["cap"]), int(w["salary"]), w["method"],
+                int(w["rest_days"]), float(w["daily_hours"]), float(w["weekly_hours"])]
+        if not vals[0]:
+            return None
+        try:
+            if wid is None:
+                cur = self.conn.execute(
+                    "INSERT INTO workers(name,hourly,cap,salary,method,rest_days,daily_hours,weekly_hours) "
+                    "VALUES(?,?,?,?,?,?,?,?)", vals)
+                wid = cur.lastrowid
+            else:
+                self.conn.execute(
+                    "UPDATE workers SET name=?,hourly=?,cap=?,salary=?,method=?,rest_days=?,daily_hours=?,"
+                    "weekly_hours=? WHERE id=?", vals + [wid])
+            self.conn.commit()
+            return wid
+        except sqlite3.IntegrityError:
+            return None
+
+    def delete_worker(self, wid: int):
+        self.conn.execute("DELETE FROM work_entries WHERE worker_id=?", [wid])
+        self.conn.execute("DELETE FROM overtime WHERE worker_id=?", [wid])
+        self.conn.execute("DELETE FROM workers WHERE id=?", [wid])
+        self.conn.commit()
+
+    def add_entry(self, wid, d, start, end, break_min, minutes):
+        self.conn.execute(
+            "INSERT INTO work_entries(worker_id,date,start,end,break_min,minutes) VALUES(?,?,?,?,?,?)",
+            [wid, d, start, end, break_min, minutes])
+        self.conn.commit()
+
+    def update_entry(self, eid, d, start, end, break_min, minutes):
+        self.conn.execute(
+            "UPDATE work_entries SET date=?,start=?,end=?,break_min=?,minutes=? WHERE id=?",
+            [d, start, end, break_min, minutes, eid])
+        self.conn.commit()
+
+    def delete_entry(self, eid):
+        self.conn.execute("DELETE FROM work_entries WHERE id=?", [eid])
+        self.conn.commit()
+
+    def entries(self, wid, y, m):
+        s, e = month_range(y, m)
+        return self.conn.execute(
+            "SELECT * FROM work_entries WHERE worker_id=? AND date>=? AND date<? ORDER BY date, start, id",
+            [wid, s, e]).fetchall()
+
+    def get_overtime(self, wid, y, m) -> int:
+        r = self.conn.execute("SELECT amount FROM overtime WHERE worker_id=? AND ym=?",
+                              [wid, f"{y}-{m:02d}"]).fetchone()
+        return r["amount"] if r else 0
+
+    def set_overtime(self, wid, y, m, cents: int):
+        self.conn.execute(
+            "INSERT INTO overtime(worker_id,ym,amount) VALUES(?,?,?) "
+            "ON CONFLICT(worker_id,ym) DO UPDATE SET amount=excluded.amount",
+            [wid, f"{y}-{m:02d}", int(cents)])
+        self.conn.commit()
 
     # ---- 设置 / 备份 ----
     def get_setting(self, key, default=None):
