@@ -84,3 +84,48 @@ def calc(worker, total_minutes: int, overtime_cents: int) -> dict:
         "capped": capped, "regular": regular, "overtime": int(overtime_cents),
         "total": regular + int(overtime_cents),
     }
+
+
+def month_result(db, worker, y: int, m: int) -> dict:
+    """某工人某月的完整结算：工时 → 基本工资(封顶) → 加班 → 应付 → 实付(转账+现金)。"""
+    wid = worker["id"]
+    mo = db.get_month(wid, y, m)
+    daily = sum(e["minutes"] for e in db.entries(wid, y, m))
+    minutes = mo["total_minutes"] if mo["mode"] == "total" else daily
+    mult = Decimal(str(worker["ot_mult"]))
+    ot_calc = int((Decimal(mo["ot_minutes"]) * int(worker["hourly"]) * mult / 60).quantize(Decimal(1), ROUND_HALF_UP))
+    extra = db.get_overtime(wid, y, m)
+    r = calc(worker, minutes, ot_calc + extra)
+    r.update(mode=mo["mode"], ot_minutes=mo["ot_minutes"], ot_mult=float(mult), ot_calc=ot_calc, ot_extra=extra,
+             transfer=mo["transfer"], cash=mo["cash"], paid=mo["transfer"] + mo["cash"], daily_minutes=daily)
+    return r
+
+
+def carry_over(db, worker, y: int, m: int) -> int:
+    """截至上月底仍未付清的工资（应付合计 − 实付合计）。"""
+    prefix = f"{y}-{m:02d}"
+    total = 0
+    for ym in db.months_with_data(worker["id"]):
+        if ym < prefix:
+            r = month_result(db, worker, int(ym[:4]), int(ym[5:7]))
+            total += r["total"] - r["paid"]
+    return total
+
+
+def month_rows(db, y: int, m: int, worker_ids=None):
+    """[(worker, result)]：在职、或该月/之前有数据（含未付结转）的工人；result 含 carry / cum。"""
+    out = []
+    for w in db.workers():
+        if worker_ids is not None and w["id"] not in worker_ids:
+            continue
+        r = month_result(db, w, y, m)
+        r["carry"] = carry_over(db, w, y, m)
+        r["cum"] = r["carry"] + r["total"] - r["paid"]
+        if worker_ids is not None or w["active"] or r["total"] or r["paid"] or r["carry"]:
+            out.append((w, r))
+    return out
+
+
+def payroll_expense(rows, basis: str) -> int:
+    """工资计入支出：basis='payable' 按应付，'paid' 按实付。"""
+    return sum(r["total"] if basis == "payable" else r["paid"] for _w, r in rows)

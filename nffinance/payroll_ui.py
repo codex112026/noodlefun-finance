@@ -7,7 +7,7 @@ from PySide6.QtCore import QDate, QRegularExpression, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QStyledItemDelegate, QVBoxLayout, QWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
 from . import payroll as P
@@ -74,6 +74,25 @@ class DecimalEdit(QLineEdit):
         self.setText(str(int(d)) if d == d.to_integral() else str(d).replace(".", ","))
 
 
+class HoursEdit(QLineEdit):
+    """小时数输入（如 173,2）；内部以分钟保存。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignRight)
+        self.setValidator(_validator(self, r"^\d{0,3}([.,]\d{0,2})?$"))
+
+    def minutes(self) -> int:
+        try:
+            return int((Decimal(self.text().replace(",", ".") or "0") * 60).quantize(Decimal(1)))
+        except InvalidOperation:
+            return 0
+
+    def set_minutes(self, m: int):
+        s = f"{Decimal(m) / 60:.2f}".rstrip("0").rstrip(".") if m else ""
+        self.setText(s.replace(".", ","))
+
+
 class TimeDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         return TimeEdit(parent)
@@ -125,6 +144,10 @@ class WorkerDialog(QDialog):
         self.formula.setWordWrap(True)
         self.hourly = MoneyEdit()
         self.cap = MoneyEdit()
+        self.ot_mult = DecimalEdit()
+        self.status = QComboBox()
+        self.status.addItem(t("status_active"), 1)
+        self.status.addItem(t("status_left"), 0)
         form = QFormLayout()
         form.addRow(t("worker_name"), self.name)
         form.addRow(t("monthly_salary"), self.salary)
@@ -136,6 +159,8 @@ class WorkerDialog(QDialog):
         form.addRow("", self.formula)
         form.addRow(t("hourly_rate"), self.hourly)
         form.addRow(t("monthly_cap"), self.cap)
+        form.addRow(t("ot_mult"), self.ot_mult)
+        form.addRow(t("status"), self.status)
         b_new, b_save, b_del, b_close = (QPushButton(t(k)) for k in ("new", "save_worker", "delete", "close"))
         row = QHBoxLayout()
         for b in (b_new, b_save, b_del):
@@ -170,7 +195,7 @@ class WorkerDialog(QDialog):
         self.list.blockSignals(True)
         self.list.clear()
         for w in self.db.workers():
-            it = QListWidgetItem(w["name"])
+            it = QListWidgetItem(w["name"] + ("" if w["active"] else f"  ({self.tr('status_left')})"))
             it.setData(Qt.UserRole, w["id"])
             self.list.addItem(it)
             if w["id"] == select_id:
@@ -191,6 +216,8 @@ class WorkerDialog(QDialog):
         self.weekly.set_value(40)
         self.hourly.clear()
         self.cap.clear()
+        self.ot_mult.set_value("1.5")
+        self.status.setCurrentIndex(0)
         self.formula.clear()
         self.on_method()
         self.name.setFocus()
@@ -210,6 +237,8 @@ class WorkerDialog(QDialog):
         self.weekly.set_value(w["weekly_hours"])
         self.hourly.set_cents(w["hourly"])
         self.cap.set_cents(w["cap"])
+        self.ot_mult.set_value(w["ot_mult"])
+        self.status.setCurrentIndex(0 if w["active"] else 1)
         self.formula.clear()
         self.on_method()
 
@@ -227,6 +256,7 @@ class WorkerDialog(QDialog):
             "name": self.name.text(), "hourly": self.hourly.cents(), "cap": self.cap.cents(),
             "salary": self.salary.cents(), "method": self.method.currentData(), "rest_days": self.rest.value(),
             "daily_hours": float(self.daily.value()), "weekly_hours": float(self.weekly.value()),
+            "ot_mult": float(self.ot_mult.value() or 1), "active": self.status.currentData(),
         }
         wid = self.db.save_worker(data, self.current_id)
         if wid is None:
@@ -276,8 +306,9 @@ class PayrollTab(QWidget):
             entry.addWidget(w)
         entry.addWidget(self.btn_add)
         entry.addStretch()
-        box = QGroupBox(t("tab_payroll"))
-        QVBoxLayout(box).addLayout(entry)
+        self.entry_box = QGroupBox(t("entries_month").split("（")[0].split(" (")[0])
+        QVBoxLayout(self.entry_box).addLayout(entry)
+        box = self.entry_box
 
         self.table = make_table([t("date"), t("start_time"), t("end_time"), t("break_min"), t("hours")],
                                 editable=True)
@@ -292,24 +323,46 @@ class PayrollTab(QWidget):
         left.addWidget(self.table, 1)
         left.addWidget(self.btn_del, 0, Qt.AlignLeft)
 
-        # 计算结果
+        # 结算面板
+        self.mode = NavCombo()
+        self.mode.addItem(t("mode_daily"), "daily")
+        self.mode.addItem(t("mode_total"), "total")
+        self.total_hours, self.ot_hours = HoursEdit(), HoursEdit()
+        self.overtime = MoneyEdit()
+        self.transfer, self.cash = MoneyEdit(), MoneyEdit()
+        self.l_note = QLabel()
+        self.l_note.setWordWrap(True)
+        self.l_note.setStyleSheet("color: #e0a030;")
         self.l_hours, self.l_rate, self.l_regular = QLabel(), QLabel(), QLabel()
         self.l_cap = QLabel()
         self.l_cap.setWordWrap(True)
         self.l_cap.setStyleSheet("color: #d9534f;")
-        self.overtime = MoneyEdit()
-        self.l_total = QLabel("0,00 €")
-        f = self.l_total.font()
-        f.setBold(True)
-        f.setPointSize(f.pointSize() + 4)
-        self.l_total.setFont(f)
+        self.l_otcalc, self.l_ottotal = QLabel(), QLabel()
+        self.l_otcalc.setWordWrap(True)
+        self.l_payable, self.l_paid, self.l_carry, self.l_cum = QLabel(), QLabel(), QLabel(), QLabel()
+        for lab in (self.l_payable, self.l_cum):
+            f = lab.font()
+            f.setBold(True)
+            f.setPointSize(f.pointSize() + 3)
+            lab.setFont(f)
         form = QFormLayout()
+        form.addRow(t("settle_mode"), self.mode)
+        form.addRow(t("month_total_hours"), self.total_hours)
+        form.addRow("", self.l_note)
+        form.addRow(t("overtime_hours"), self.ot_hours)
         form.addRow(t("total_hours"), self.l_hours)
         form.addRow(t("hourly_rate"), self.l_rate)
         form.addRow(t("regular_pay"), self.l_regular)
         form.addRow("", self.l_cap)
-        form.addRow(t("overtime_pay"), self.overtime)
-        form.addRow(t("total_pay"), self.l_total)
+        form.addRow(t("ot_calc"), self.l_otcalc)
+        form.addRow(t("ot_extra"), self.overtime)
+        form.addRow(t("overtime_pay"), self.l_ottotal)
+        form.addRow(t("payable"), self.l_payable)
+        form.addRow(t("transfer"), self.transfer)
+        form.addRow(t("cash_paid"), self.cash)
+        form.addRow(t("paid"), self.l_paid)
+        form.addRow(t("carry"), self.l_carry)
+        form.addRow(t("cum_payable"), self.l_cum)
         sbox = QGroupBox(t("tab_payroll"))
         sbox.setLayout(form)
         self.btn_pdf_all = QPushButton(t("export_payroll"))
@@ -319,9 +372,12 @@ class PayrollTab(QWidget):
         right.addWidget(self.btn_pdf_all)
         right.addWidget(self.btn_pdf_one)
         right.addStretch()
-        rw = QWidget()
-        rw.setLayout(right)
-        rw.setFixedWidth(400)
+        inner = QWidget()
+        inner.setLayout(right)
+        rw = QScrollArea()
+        rw.setWidgetResizable(True)
+        rw.setWidget(inner)
+        rw.setFixedWidth(440)
 
         body = QHBoxLayout()
         body.addLayout(left, 1)
@@ -336,7 +392,11 @@ class PayrollTab(QWidget):
         self.btn_add.clicked.connect(lambda: self.add(False))
         self.btn_del.clicked.connect(self.remove)
         self.table.itemChanged.connect(self.on_item_changed)
-        self.overtime.editingFinished.connect(self.save_overtime)
+        self.mode.currentIndexChanged.connect(self.save_month)
+        for e in (self.total_hours, self.ot_hours, self.overtime, self.transfer, self.cash):
+            e.editingFinished.connect(self.save_month)
+        link_enter([self.mode, self.total_hours, self.ot_hours, self.overtime, self.transfer, self.cash],
+                   lambda: self.date.setFocus(Qt.TabFocusReason))
         self.btn_pdf_all.clicked.connect(lambda: self.export(False))
         self.btn_pdf_one.clicked.connect(lambda: self.export(True))
         link_enter([self.date, self.start, self.end, self.brk], self.ask_add)
@@ -351,7 +411,7 @@ class PayrollTab(QWidget):
         self.worker.blockSignals(True)
         self.worker.clear()
         for w in self.db.workers():
-            self.worker.addItem(w["name"], w["id"])
+            self.worker.addItem(w["name"] + ("" if w["active"] else f"  ({self.tr('status_left')})"), w["id"])
         i = self.worker.findData(keep)
         self.worker.setCurrentIndex(i if i >= 0 else 0)
         self.worker.blockSignals(False)
@@ -391,33 +451,68 @@ class PayrollTab(QWidget):
             h.setFlags(h.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(i, 4, h)
         self._loading = False
-        self.overtime.set_cents(self.db.get_overtime(wid, y, m) if wid is not None else 0)
-        self.overtime.setEnabled(wid is not None)
+        self.load_month()
+
+    def load_month(self):
+        wid = self.wid()
+        y, m = self.month.ym()
+        has = wid is not None
+        mo = self.db.get_month(wid, y, m) if has else {"mode": "daily", "total_minutes": 0, "ot_minutes": 0,
+                                                       "transfer": 0, "cash": 0}
+        self.mode.blockSignals(True)
+        self.mode.setCurrentIndex(0 if mo["mode"] == "daily" else 1)
+        self.mode.blockSignals(False)
+        self.total_hours.set_minutes(mo["total_minutes"])
+        self.ot_hours.set_minutes(mo["ot_minutes"])
+        self.transfer.set_cents(mo["transfer"])
+        self.cash.set_cents(mo["cash"])
+        self.overtime.set_cents(self.db.get_overtime(wid, y, m) if has else 0)
+        for wdg in (self.mode, self.ot_hours, self.overtime, self.transfer, self.cash):
+            wdg.setEnabled(has)
+        self.apply_mode()
+        self.update_summary()
+
+    def apply_mode(self):
+        total = self.mode.currentData() == "total"
+        has = self.wid() is not None
+        self.total_hours.setEnabled(has and total)
+        self.entry_box.setEnabled(has and not total)
+        self.l_note.setText(self.tr("total_mode_note") if total else "")
+
+    def save_month(self):
+        wid = self.wid()
+        if wid is None:
+            return
+        y, m = self.month.ym()
+        self.db.set_month(wid, y, m, mode=self.mode.currentData(), total_minutes=self.total_hours.minutes(),
+                          ot_minutes=self.ot_hours.minutes(), transfer=self.transfer.cents(), cash=self.cash.cents())
+        self.db.set_overtime(wid, y, m, self.overtime.cents())
+        self.apply_mode()
         self.update_summary()
 
     def update_summary(self):
         wid = self.wid()
+        labels = (self.l_hours, self.l_rate, self.l_regular, self.l_cap, self.l_otcalc, self.l_ottotal,
+                  self.l_payable, self.l_paid, self.l_carry, self.l_cum)
         if wid is None:
-            for l in (self.l_hours, self.l_rate, self.l_regular, self.l_cap):
+            for l in labels:
                 l.clear()
-            self.l_total.setText(fmt_eur(0))
             return
         y, m = self.month.ym()
         w = self.db.get_worker(wid)
-        r = P.calc(w, sum(e["minutes"] for e in self.db.entries(wid, y, m)), self.overtime.cents())
+        r = P.month_result(self.db, w, y, m)
+        carry = P.carry_over(self.db, w, y, m)
         self.l_hours.setText(P.fmt_hours(r["minutes"]))
         self.l_rate.setText(fmt_eur(r["rate"]) + " / h")
         self.l_regular.setText(fmt_eur(r["regular"]))
         self.l_cap.setText(self.tr("cap_applied", c=fmt_eur(r["cap"]), g=fmt_eur(r["gross"])) if r["capped"] else "")
-        self.l_total.setText(fmt_eur(r["total"]))
-
-    def save_overtime(self):
-        wid = self.wid()
-        if wid is None:
-            return
-        y, m = self.month.ym()
-        self.db.set_overtime(wid, y, m, self.overtime.cents())
-        self.update_summary()
+        self.l_otcalc.setText(
+            f"{P.fmt_hours(r['ot_minutes'])} × {fmt_eur(r['rate'])} × {P.de_num(r['ot_mult'])} = {fmt_eur(r['ot_calc'])}")
+        self.l_ottotal.setText(fmt_eur(r["overtime"]))
+        self.l_payable.setText(fmt_eur(r["total"]))
+        self.l_paid.setText(fmt_eur(r["paid"]))
+        self.l_carry.setText(fmt_eur(carry))
+        self.l_cum.setText(fmt_eur(carry + r["total"] - r["paid"]))
 
     # ---- 录入 ----
     def _read_entry(self):
@@ -500,7 +595,7 @@ class PayrollTab(QWidget):
         if not self.db.workers() or (only_current and self.wid() is None):
             QMessageBox.information(self, self.tr("tab_payroll"), self.tr("need_worker"))
             return
-        self.save_overtime()
+        self.save_month()
         y, m = self.month.ym()
         ids = [self.wid()] if only_current else None
         name = f"_{self.worker.currentText()}" if only_current else ""

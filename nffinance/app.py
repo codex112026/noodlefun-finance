@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QProgressDialog, QPushButton, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from . import payroll as P
 from . import report, updater
 from .payroll_ui import PayrollTab
 from .db import CHANNELS, Database
@@ -379,6 +380,12 @@ class SummaryTab(QWidget):
         self.month = MonthPicker()
         self.t_ch = make_table([t("channel"), t("amount")])
         self.t_cat = make_table([t("category"), t("amount")])
+        self.t_pay = make_table([t("worker"), t("sum_payable"), t("sum_paid"), t("sum_cum")])
+        self.t_pay.setMaximumHeight(170)
+        self.basis = QComboBox()
+        self.basis.addItem(t("basis_payable"), "payable")
+        self.basis.addItem(t("basis_paid"), "paid")
+        self.basis.setCurrentIndex(0 if db.get_setting("payroll_basis", "payable") == "payable" else 1)
         self.lbl_bal = QLabel()
         f = self.lbl_bal.font()
         f.setBold(True)
@@ -394,6 +401,9 @@ class SummaryTab(QWidget):
         bar.addWidget(QLabel(t("month")))
         bar.addWidget(self.month)
         bar.addWidget(self.btn_month)
+        bar.addSpacing(16)
+        bar.addWidget(QLabel(t("basis_label")))
+        bar.addWidget(self.basis)
         bar.addStretch()
         bar.addWidget(QLabel(t("daily_report_date")))
         bar.addWidget(self.day)
@@ -407,8 +417,11 @@ class SummaryTab(QWidget):
         main = QVBoxLayout(self)
         main.addLayout(bar)
         main.addLayout(tables, 1)
+        main.addWidget(QLabel(t("pay_detail")))
+        main.addWidget(self.t_pay)
         main.addWidget(self.lbl_bal, 0, Qt.AlignRight)
 
+        self.basis.currentIndexChanged.connect(self.on_basis)
         self.month.dateChanged.connect(self.reload)
         self.btn_month.clicked.connect(self.export_month)
         self.btn_day.clicked.connect(self.export_day)
@@ -431,6 +444,11 @@ class SummaryTab(QWidget):
         self.t_ch.setItem(i, 0, cell(self.tr("total_income"), bold=True))
         self.t_ch.setItem(i, 1, cell(fmt_eur(income), right=True, bold=True))
         cats = report._cat_totals(exps)
+        basis = self.basis.currentData()
+        prow = P.month_rows(self.db, y, m)
+        pay_total = P.payroll_expense(prow, basis)
+        if pay_total:
+            cats[report.payroll_label(self.tr, basis)] = pay_total
         self.t_cat.setRowCount(0)
         for k, v in cats.items():
             i = self.t_cat.rowCount()
@@ -442,6 +460,18 @@ class SummaryTab(QWidget):
         self.t_cat.setItem(i, 0, cell(self.tr("total_expenses"), bold=True))
         self.t_cat.setItem(i, 1, cell(fmt_eur(sum(cats.values())), right=True, bold=True))
         self.lbl_bal.setText(f"{self.tr('balance')}: {fmt_eur(income - sum(cats.values()))}")
+        self.t_pay.setRowCount(0)
+        for w, r in prow:
+            i = self.t_pay.rowCount()
+            self.t_pay.insertRow(i)
+            self.t_pay.setItem(i, 0, cell(w["name"] + ("" if w["active"] else f"  ({self.tr('status_left')})")))
+            self.t_pay.setItem(i, 1, cell(fmt_eur(r["total"]), right=True))
+            self.t_pay.setItem(i, 2, cell(fmt_eur(r["paid"]), right=True))
+            self.t_pay.setItem(i, 3, cell(fmt_eur(r["cum"]), right=True, bold=True))
+
+    def on_basis(self):
+        self.db.set_setting("payroll_basis", self.basis.currentData())
+        self.reload()
 
     def _ask_path(self, default):
         path, _ = QFileDialog.getSaveFileName(self, self.tr("export_monthly"), default, self.tr("pdf_filter"))

@@ -94,15 +94,19 @@ class NavCombo(QComboBox):
 
 
 def link_enter(widgets, on_last):
-    """Enter 跳到下一项；在最后一项按 Enter 调用 on_last。"""
+    """Enter 跳到下一个可用项（跳过被禁用的）；在最后一项按 Enter 调用 on_last。"""
     def sig(w):
         return w.returnPressed if isinstance(w, QLineEdit) else w.enterPressed
 
-    for i, w in enumerate(widgets):
-        if i + 1 < len(widgets):
-            sig(w).connect(lambda n=widgets[i + 1]: n.setFocus(Qt.TabFocusReason))
-        else:
-            sig(w).connect(on_last)
+    def go(i):
+        for n in widgets[i + 1:]:
+            if n.isEnabled():
+                n.setFocus(Qt.TabFocusReason)
+                return
+        on_last()
+
+    for i, wd in enumerate(widgets):
+        sig(wd).connect(lambda i=i: go(i))
 
 
 # ---- 表格内双击编辑用的委托 ----

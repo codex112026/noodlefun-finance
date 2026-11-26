@@ -10,6 +10,7 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from . import payroll as P
 from .db import CHANNELS
 from .i18n import fmt_eur
 from .paths import resource_path
@@ -101,6 +102,23 @@ def _footer(tr):
         canvas.restoreState()
 
     return draw
+
+
+def payroll_label(tr, basis):
+    return f"{tr('payroll_expense')} ({tr('basis_payable') if basis == 'payable' else tr('basis_paid')})"
+
+
+def _payroll_table(prow, tr, st, width):
+    data = [[tr("worker"), tr("sum_payable"), tr("transfer"), tr("cash_paid"), tr("sum_paid"), tr("sum_cum")]]
+    for w, r in prow:
+        name = w["name"] + ("" if w["active"] else f" ({tr('status_left')})")
+        data.append([Paragraph(name, st["cell"]), fmt_eur(r["total"]), fmt_eur(r["transfer"]), fmt_eur(r["cash"]),
+                     fmt_eur(r["paid"]), fmt_eur(r["cum"])])
+    data.append([tr("total"), fmt_eur(sum(r["total"] for _w, r in prow)), fmt_eur(sum(r["transfer"] for _w, r in prow)),
+                 fmt_eur(sum(r["cash"] for _w, r in prow)), fmt_eur(sum(r["paid"] for _w, r in prow)),
+                 fmt_eur(sum(r["cum"] for _w, r in prow))])
+    cw = [width * 0.22] + [width * 0.156] * 5
+    return _table(data, cw, num_cols=(1, 2, 3, 4, 5))
 
 
 def _sum_channels(rows):
@@ -208,7 +226,16 @@ def build_monthly(path, db, year, month, tr):
 
     story.append(Paragraph(tr("expense_list"), st["h"]))
     story.append(_exp_table(exps, st, tr, width))
+    prow = P.month_rows(db, year, month)
+    basis = db.get_setting("payroll_basis", "payable")
+    cats = _cat_totals(exps)
+    pay_total = P.payroll_expense(prow, basis)
+    if prow:
+        story.append(Paragraph(tr("payroll_expense"), st["h"]))
+        story.append(_payroll_table(prow, tr, st, width))
+    if pay_total:
+        cats[payroll_label(tr, basis)] = pay_total
     story.append(Paragraph(tr("summary"), st["h"]))
-    _summary_blocks(story, st, tr, _sum_channels(rows), _cat_totals(exps), width)
+    _summary_blocks(story, st, tr, _sum_channels(rows), cats, width)
     foot = _footer(tr)
     doc.build(story, onFirstPage=foot, onLaterPages=foot)

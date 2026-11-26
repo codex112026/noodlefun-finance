@@ -53,7 +53,9 @@ class Database:
                 method TEXT NOT NULL DEFAULT 'rough',    -- rough | at
                 rest_days INTEGER NOT NULL DEFAULT 8,
                 daily_hours REAL NOT NULL DEFAULT 8,
-                weekly_hours REAL NOT NULL DEFAULT 40
+                weekly_hours REAL NOT NULL DEFAULT 40,
+                ot_mult REAL NOT NULL DEFAULT 1.5,       -- 加班时间折算倍率
+                active INTEGER NOT NULL DEFAULT 1        -- 1=在职 0=离职
             );
             CREATE TABLE IF NOT EXISTS work_entries(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +67,16 @@ class Database:
                 minutes INTEGER NOT NULL                 -- 实际工作分钟数
             );
             CREATE INDEX IF NOT EXISTS idx_we ON work_entries(worker_id, date);
+            CREATE TABLE IF NOT EXISTS payroll_months(
+                worker_id INTEGER NOT NULL,
+                ym TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'daily',      -- daily=按每日工时 | total=直接输入总工时
+                total_minutes INTEGER NOT NULL DEFAULT 0,
+                ot_minutes INTEGER NOT NULL DEFAULT 0,   -- 加班时间（分钟，另计）
+                transfer INTEGER NOT NULL DEFAULT 0,     -- 转账金额（分）
+                cash INTEGER NOT NULL DEFAULT 0,         -- 现金金额（分）
+                PRIMARY KEY(worker_id, ym)
+            );
             CREATE TABLE IF NOT EXISTS overtime(
                 worker_id INTEGER NOT NULL,
                 ym TEXT NOT NULL,                        -- 'YYYY-MM'
@@ -73,6 +85,12 @@ class Database:
             );
             """
         )
+        # 旧版数据库升级：给 workers 补列
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(workers)")}
+        if "ot_mult" not in cols:
+            self.conn.execute("ALTER TABLE workers ADD COLUMN ot_mult REAL NOT NULL DEFAULT 1.5")
+        if "active" not in cols:
+            self.conn.execute("ALTER TABLE workers ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
         self.conn.commit()
 
     # ---- 金额一律以「分」存储（整数），避免浮点误差 ----
@@ -147,7 +165,7 @@ class Database:
 
     # ---- 工资结算 ----
     def workers(self):
-        return self.conn.execute("SELECT * FROM workers ORDER BY name COLLATE NOCASE").fetchall()
+        return self.conn.execute("SELECT * FROM workers ORDER BY active DESC, name COLLATE NOCASE").fetchall()
 
     def get_worker(self, wid: int):
         return self.conn.execute("SELECT * FROM workers WHERE id=?", [wid]).fetchone()
@@ -155,19 +173,20 @@ class Database:
     def save_worker(self, w: dict, wid=None):
         """新增（wid=None）或更新；姓名重复返回 None，否则返回 id。"""
         vals = [w["name"].strip(), int(w["hourly"]), int(w["cap"]), int(w["salary"]), w["method"],
-                int(w["rest_days"]), float(w["daily_hours"]), float(w["weekly_hours"])]
+                int(w["rest_days"]), float(w["daily_hours"]), float(w["weekly_hours"]),
+                float(w.get("ot_mult", 1.5)), int(w.get("active", 1))]
         if not vals[0]:
             return None
         try:
             if wid is None:
                 cur = self.conn.execute(
-                    "INSERT INTO workers(name,hourly,cap,salary,method,rest_days,daily_hours,weekly_hours) "
-                    "VALUES(?,?,?,?,?,?,?,?)", vals)
+                    "INSERT INTO workers(name,hourly,cap,salary,method,rest_days,daily_hours,weekly_hours,"
+                    "ot_mult,active) VALUES(?,?,?,?,?,?,?,?,?,?)", vals)
                 wid = cur.lastrowid
             else:
                 self.conn.execute(
                     "UPDATE workers SET name=?,hourly=?,cap=?,salary=?,method=?,rest_days=?,daily_hours=?,"
-                    "weekly_hours=? WHERE id=?", vals + [wid])
+                    "weekly_hours=?,ot_mult=?,active=? WHERE id=?", vals + [wid])
             self.conn.commit()
             return wid
         except sqlite3.IntegrityError:
@@ -176,6 +195,7 @@ class Database:
     def delete_worker(self, wid: int):
         self.conn.execute("DELETE FROM work_entries WHERE worker_id=?", [wid])
         self.conn.execute("DELETE FROM overtime WHERE worker_id=?", [wid])
+        self.conn.execute("DELETE FROM payroll_months WHERE worker_id=?", [wid])
         self.conn.execute("DELETE FROM workers WHERE id=?", [wid])
         self.conn.commit()
 
@@ -212,6 +232,32 @@ class Database:
             "ON CONFLICT(worker_id,ym) DO UPDATE SET amount=excluded.amount",
             [wid, f"{y}-{m:02d}", int(cents)])
         self.conn.commit()
+
+    def get_month(self, wid, y, m) -> dict:
+        r = self.conn.execute("SELECT * FROM payroll_months WHERE worker_id=? AND ym=?",
+                              [wid, f"{y}-{m:02d}"]).fetchone()
+        if r:
+            return {k: r[k] for k in ("mode", "total_minutes", "ot_minutes", "transfer", "cash")}
+        return {"mode": "daily", "total_minutes": 0, "ot_minutes": 0, "transfer": 0, "cash": 0}
+
+    def set_month(self, wid, y, m, **fields):
+        cur = self.get_month(wid, y, m)
+        cur.update(fields)
+        self.conn.execute(
+            "INSERT INTO payroll_months(worker_id,ym,mode,total_minutes,ot_minutes,transfer,cash) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(worker_id,ym) DO UPDATE SET mode=excluded.mode, "
+            "total_minutes=excluded.total_minutes, ot_minutes=excluded.ot_minutes, "
+            "transfer=excluded.transfer, cash=excluded.cash",
+            [wid, f"{y}-{m:02d}", cur["mode"], int(cur["total_minutes"]), int(cur["ot_minutes"]),
+             int(cur["transfer"]), int(cur["cash"])])
+        self.conn.commit()
+
+    def months_with_data(self, wid) -> list:
+        rows = self.conn.execute(
+            "SELECT substr(date,1,7) ym FROM work_entries WHERE worker_id=? UNION "
+            "SELECT ym FROM payroll_months WHERE worker_id=? UNION SELECT ym FROM overtime WHERE worker_id=?",
+            [wid, wid, wid]).fetchall()
+        return sorted(r["ym"] for r in rows)
 
     # ---- 设置 / 备份 ----
     def get_setting(self, key, default=None):

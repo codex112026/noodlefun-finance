@@ -1,4 +1,4 @@
-"""工资单 PDF：多人时第一页是全员汇总，之后每个工人一页（每日工时 + 计算过程）。"""
+"""工资单 PDF：多人时第一页是全员汇总，之后每个工人一页（每日工时 + 计算过程 + 实付/累计）。"""
 from datetime import date as _date
 
 from reportlab.lib.pagesizes import A4
@@ -11,9 +11,12 @@ from .report import _footer, _header, _styles, _table
 
 
 def _worker_story(w, entries, r, year, month, tr, st, width):
-    story = [_header(tr("payroll_title"), f"{w['name']}  ·  {month:02d} / {year}", width, st), Spacer(1, 8)]
+    left = "" if w["active"] else f" ({tr('status_left')})"
+    story = [_header(tr("payroll_title"), f"{w['name']}{left}  ·  {month:02d} / {year}", width, st), Spacer(1, 8)]
     story.append(Paragraph(tr("hours"), st["h"]))
-    if entries:
+    if r["mode"] == "total":
+        story.append(Paragraph(f"{tr('mode_total')}: {P.fmt_hours(r['minutes'])}", st["cell"]))
+    elif entries:
         data = [[tr("date"), tr("start_time"), tr("end_time"), tr("break_min"), tr("hours")]]
         for e in entries:
             data.append([
@@ -26,6 +29,7 @@ def _worker_story(w, entries, r, year, month, tr, st, width):
     else:
         story.append(Paragraph(tr("no_data"), st["cell"]))
     story.append(Spacer(1, 10))
+
     rows = [
         [tr("total_hours"), P.fmt_hours(r["minutes"])],
         [tr("hourly_rate"), fmt_eur(r["rate"]) + " / h"],
@@ -33,8 +37,21 @@ def _worker_story(w, entries, r, year, month, tr, st, width):
     ]
     if r["capped"]:
         rows.append([tr("cap_applied", c=fmt_eur(r["cap"]), g=fmt_eur(r["gross"])), fmt_eur(r["cap"])])
-    rows += [[tr("overtime_pay"), fmt_eur(r["overtime"])], [tr("total_pay"), fmt_eur(r["total"])]]
-    story.append(_table([[tr("summary"), tr("amount")]] + rows, [width * 0.68, width * 0.32], num_cols=(1,)))
+    if r["ot_minutes"]:
+        rows.append([f"{tr('ot_calc')}: {P.fmt_hours(r['ot_minutes'])} × {fmt_eur(r['rate'])} × {P.de_num(r['ot_mult'])}",
+                     fmt_eur(r["ot_calc"])])
+    if r["ot_extra"]:
+        rows.append([tr("ot_extra"), fmt_eur(r["ot_extra"])])
+    rows += [
+        [tr("payable"), fmt_eur(r["total"])],
+        [tr("transfer"), fmt_eur(r["transfer"])],
+        [tr("cash_paid"), fmt_eur(r["cash"])],
+        [tr("paid"), fmt_eur(r["paid"])],
+        [tr("carry"), fmt_eur(r["carry"])],
+        [tr("cum_payable"), fmt_eur(r["cum"])],
+    ]
+    t = _table([[tr("summary"), tr("amount")]] + rows, [width * 0.68, width * 0.32], num_cols=(1,))
+    story.append(t)
     return story
 
 
@@ -43,30 +60,29 @@ def build_payroll(path, db, year, month, tr, worker_ids=None):
     width = A4[0] - 3 * cm
     doc = SimpleDocTemplate(path, pagesize=A4, leftMargin=1.5 * cm, rightMargin=1.5 * cm, topMargin=1.5 * cm,
                             bottomMargin=1.8 * cm, title=f"{tr('payroll_title')} {month:02d}/{year}")
-    workers = [w for w in db.workers() if worker_ids is None or w["id"] in worker_ids]
-    results = []
-    for w in workers:
-        entries = db.entries(w["id"], year, month)
-        r = P.calc(w, sum(e["minutes"] for e in entries), db.get_overtime(w["id"], year, month))
-        results.append((w, entries, r))
+    results = [(w, db.entries(w["id"], year, month), r) for w, r in P.month_rows(db, year, month, worker_ids)]
 
     story = []
     if len(results) != 1:  # 全员汇总（只导出一人时省略）
         story += [_header(tr("payroll_summary"), f"{month:02d} / {year}", width, st), Spacer(1, 8)]
         if results:
-            data = [[tr("worker"), tr("hours"), tr("hourly_short"), tr("sum_regular"), tr("sum_overtime"), tr("sum_total")]]
+            data = [[tr("worker"), tr("hours"), tr("sum_regular"), tr("sum_overtime"), tr("sum_payable"),
+                     tr("sum_paid"), tr("sum_cum")]]
             for w, _e, r in results:
-                data.append([Paragraph(w["name"], st["cell"]), P.fmt_hours(r["minutes"]), fmt_eur(r["rate"]),
-                             fmt_eur(r["regular"]), fmt_eur(r["overtime"]), fmt_eur(r["total"])])
-            data.append([tr("total"), P.fmt_hours(sum(r["minutes"] for _w, _e, r in results)), "",
+                name = w["name"] + ("" if w["active"] else f" ({tr('status_left')})")
+                data.append([Paragraph(name, st["cell"]), P.fmt_hours(r["minutes"]), fmt_eur(r["regular"]),
+                             fmt_eur(r["overtime"]), fmt_eur(r["total"]), fmt_eur(r["paid"]), fmt_eur(r["cum"])])
+            data.append([tr("total"), P.fmt_hours(sum(r["minutes"] for _w, _e, r in results)),
                          fmt_eur(sum(r["regular"] for _w, _e, r in results)),
                          fmt_eur(sum(r["overtime"] for _w, _e, r in results)),
-                         fmt_eur(sum(r["total"] for _w, _e, r in results))])
-            story.append(_table(data, [width * 0.22, width * 0.15, width * 0.14, width * 0.17, width * 0.14,
-                                       width * 0.18], num_cols=(1, 2, 3, 4, 5)))
+                         fmt_eur(sum(r["total"] for _w, _e, r in results)),
+                         fmt_eur(sum(r["paid"] for _w, _e, r in results)),
+                         fmt_eur(sum(r["cum"] for _w, _e, r in results))])
+            story.append(_table(data, [width * 0.17, width * 0.11, width * 0.14, width * 0.12, width * 0.15,
+                                       width * 0.14, width * 0.17], num_cols=(1, 2, 3, 4, 5, 6)))
         else:
             story.append(Paragraph(tr("no_workers"), st["cell"]))
-    for i, (w, entries, r) in enumerate(results):
+    for w, entries, r in results:
         if story:
             story.append(PageBreak())
         story += _worker_story(w, entries, r, year, month, tr, st, width)
