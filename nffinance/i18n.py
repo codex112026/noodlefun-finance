@@ -237,6 +237,21 @@ _T = {
         "zh": "您好，\n\n附件是 {month} 的资料压缩包（共 {count} 个文件）。\n\n谢谢！",
         "de": "Guten Tag,\n\nanbei die Unterlagen für {month} ({count} Dateien).\n\nMit freundlichen Grüßen",
     },
+    "mail_method": {"zh": "发送方式", "de": "Versandart"},
+    "method_graph": {"zh": "Microsoft 365（登录 Microsoft 账号，推荐）", "de": "Microsoft 365 (Anmeldung mit Microsoft-Konto, empfohlen)"},
+    "method_smtp": {"zh": "其他邮箱（SMTP）", "de": "Anderes Postfach (SMTP)"},
+    "graph_client_id": {"zh": "应用程序（客户端）ID", "de": "Anwendungs-(Client-)ID"},
+    "graph_tenant_id": {"zh": "目录（租户）ID", "de": "Verzeichnis-(Mandanten-)ID"},
+    "graph_login": {"zh": "登录 Microsoft 账号", "de": "Mit Microsoft-Konto anmelden"},
+    "graph_logout": {"zh": "退出登录", "de": "Abmelden"},
+    "graph_signed_in": {"zh": "已登录：{u}", "de": "Angemeldet: {u}"},
+    "graph_not_signed": {"zh": "尚未登录", "de": "Nicht angemeldet"},
+    "graph_need_ids": {"zh": "请填写应用程序 ID 和租户 ID", "de": "Bitte Anwendungs-ID und Mandanten-ID eingeben"},
+    "graph_waiting": {"zh": "请在弹出的浏览器窗口里登录…", "de": "Bitte im Browserfenster anmelden…"},
+    "graph_hint": {
+        "zh": "一次性设置：Microsoft Entra 管理中心 → 应用注册 → 新注册；平台选“移动和桌面应用程序”，重定向 URI 填 http://localhost；API 权限添加 Microsoft Graph → 委托的权限 → Mail.Send；把概览页的应用程序 ID 和目录 ID 填到上面。发件人就是登录的账号。",
+        "de": "Einmalige Einrichtung: Microsoft Entra Admin Center → App-Registrierungen → Neu; Plattform „Mobil- und Desktopanwendungen“, Umleitungs-URI http://localhost; API-Berechtigung Microsoft Graph → Delegiert → Mail.Send; Anwendungs-ID und Verzeichnis-ID oben eintragen. Absender ist das angemeldete Konto.",
+    },
     "new_name": {"zh": "新增", "de": "Neu"},
 }
 

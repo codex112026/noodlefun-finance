@@ -60,3 +60,12 @@ python run.py --no-update-check
 - 勾选「月底提醒我发送」后，月底最后一天（或下月前 5 天内还没发）打开软件时会提醒，确认后才会发送。
 - 邮箱密码用 Windows 账户加密，只保存在本机（`%APPDATA%\NoodleFunFinance\config.json`），不会进数据文件夹/OneDrive；
   密码留空则每次发送时询问。多数邮箱需在设置里开启 SMTP，并使用“应用专用密码”。
+
+### 用 Microsoft 365（GoDaddy 购买的邮箱）发送
+Microsoft 365 开着“安全默认设置”时会拒绝用密码登录的 SMTP，所以软件改用 Microsoft Graph：
+1. 用管理员账号打开 Microsoft Entra 管理中心 → 应用注册 → 新注册（单租户即可）。
+2. 身份验证 → 添加平台 → 「移动和桌面应用程序」→ 重定向 URI 填 `http://localhost`。
+3. API 权限 → 添加权限 → Microsoft Graph → 委托的权限 → `Mail.Send`（需要时点“授予管理员同意”）。
+4. 把概览页的「应用程序(客户端) ID」和「目录(租户) ID」填进软件，点「登录 Microsoft 账号」，在浏览器里用 office@ 邮箱登录一次。
+5. 之后发送都以该账号的身份发出，令牌用 Windows 账户加密保存在本机；很久不用需要重新登录。
+其他邮箱（如 Gmail）仍可选「其他邮箱（SMTP）」。
