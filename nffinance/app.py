@@ -1,3 +1,4 @@
+import calendar
 import os
 import sys
 import threading
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from . import payroll as P
 from . import report, updater
+from .mail_ui import MailDialog
 from .payroll_ui import PayrollTab
 from .db import CHANNELS, Database
 from .i18n import LANGS, Translator, fmt_eur
@@ -555,6 +557,7 @@ class MainWindow(QMainWindow):
         m.addAction(a)
         m.addAction(QAction(t("open_data_dir"), self, triggered=lambda: QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(self.db.path.parent)))))
+        m.addAction(QAction(t("mail_menu"), self, triggered=lambda: self.open_mail()))
         m.addAction(QAction(t("change_data_dir"), self, triggered=self.change_data_dir))
         m.addSeparator()
         m.addAction(QAction(t("quit"), self, triggered=self.close))
@@ -598,6 +601,27 @@ class MainWindow(QMainWindow):
         self.tr = Translator(new_db.get_setting("lang", "zh"))  # 语言等设置随数据文件夹一起恢复
         self.build()
         self.statusBar().showMessage(self.tr("data_dir_switched") + d, 6000)
+
+    def open_mail(self, ym=None):
+        MailDialog(self.db, self.tr, self, ym).exec()
+
+    def check_month_end(self):
+        """月底（当月最后一天，或下月前 5 天内尚未发送）提醒打包发送；每天最多问一次。"""
+        db = self.db
+        if db.get_setting("mail_remind", "0") != "1" or not db.get_setting("mail_to"):
+            return
+        today = _date.today()
+        if today.day == calendar.monthrange(today.year, today.month)[1]:
+            ym = (today.year, today.month)
+        elif today.day <= 5:
+            ym = (today.year - (today.month == 1), (today.month - 2) % 12 + 1)
+        else:
+            return
+        if db.get_setting("mail_last_sent") == f"{ym[0]}-{ym[1]:02d}" or db.get_setting("mail_snooze") == today.isoformat():
+            return
+        db.set_setting("mail_snooze", today.isoformat())
+        if QMessageBox.question(self, self.tr("mail_title"), self.tr("mail_remind_ask", month=f"{ym[1]:02d}/{ym[0]}")) == QMessageBox.Yes:
+            self.open_mail(ym)
 
     def backup(self):
         path, _ = QFileDialog.getSaveFileName(self, self.tr("backup"), "NoodleFun_backup.db", "SQLite (*.db)")
@@ -686,6 +710,10 @@ def main():
     db = open_database()
     w = MainWindow(db)
     w.show()
+    QTimer.singleShot(4000, w.check_month_end)
+    timer = QTimer(w)
+    timer.timeout.connect(w.check_month_end)
+    timer.start(30 * 60 * 1000)
     if "--no-update-check" not in sys.argv:
         w.check_update(manual=False)  # 启动时静默检查
     sys.exit(app.exec())
