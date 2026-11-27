@@ -31,7 +31,7 @@ jobs:
       - name: Build exe (PyInstaller)
         run: >
           pyinstaller --noconfirm --windowed --name NoodleFunFinance
-          --icon assets/icon.ico --add-data "assets;assets" run.py
+          --icon assets/icon.ico --add-data "assets;assets" --collect-all msal run.py
 
       - name: Build installer (Inno Setup)
         shell: pwsh
